@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Coin Collector — Client</title>
+<style>
+  body { margin:0; font-family: sans-serif; background:#111; color:#eee; }
+  #ui { position: fixed; left: 10px; top: 10px; z-index: 10; }
+  canvas { display:block; margin: 0 auto; background: #222; border: 1px solid #333; }
+  #status { font-size: 14px; margin-bottom:6px; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="status">Connecting...</div>
+  <div id="score">Score: 0</div>
+  <div>Controls: WASD / Arrow keys</div>
+</div>
+<canvas id="c" width="800" height="600"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+const scoreEl = document.getElementById('score');
+
+let ws;
+let myId = null;
+let mapW = canvas.width, mapH = canvas.height;
+
+const interpolationDelay = 200; // ms (matches server latency)
+let snapshotBuffer = []; // stored authoritative snapshots (oldest first)
+let localState = { x: mapW/2, y: mapH/2, seq:0, pending: [], score:0 };
+
+function connect() {
+  ws = new WebSocket('ws://' + (location.hostname || 'localhost') + ':8080');
+  ws.onopen = ()=> { status.innerText = 'Connected (waiting welcome)'; };
+  ws.onmessage = (ev)=> {
+    const data = JSON.parse(ev.data);
+    if (data.type === 'welcome') {
+      myId = data.id;
+      if (data.map) { mapW = data.map.w; mapH = data.map.h; canvas.width = mapW; canvas.height = mapH; }
+      status.innerText = 'Ready — you are ' + myId;
+      return;
+    }
+    if (data.type === 'snapshot') {
+      snapshotBuffer.push(data);
+      if (snapshotBuffer.length > 60) snapshotBuffer.shift();
+      const me = data.players.find(p=>p.id===myId);
+      if (me) {
+        const dx = me.x - localState.x, dy = me.y - localState.y;
+        if (Math.hypot(dx,dy) > 6) {
+          localState.x += dx * 0.25;
+          localState.y += dy * 0.25;
+        }
+        localState.score = me.score || 0;
+        scoreEl.innerText = 'Score: ' + localState.score;
+      }
+    }
+  };
+  ws.onclose = ()=> { status.innerText = 'Disconnected'; setTimeout(connect, 1000); };
+}
+connect();
+
+const keys = {};
+function gatherInput() {
+  return {
+    left: keys['a']||keys['ArrowLeft'],
+    right: keys['d']||keys['ArrowRight'],
+    up: keys['w']||keys['ArrowUp'],
+    down: keys['s']||keys['ArrowDown']
+  };
+}
+document.addEventListener('keydown', e=>{ keys[e.key]=true; sendInput(); });
+document.addEventListener('keyup', e=>{ keys[e.key]=false; sendInput(); });
+
+function sendInput() {
+  if (!ws || ws.readyState !== 1) return;
+  const input = gatherInput();
+  localState.seq += 1;
+  localState.pending.push({seq: localState.seq, input});
+  applyLocal(input);
+  ws.send(JSON.stringify({ type:'input', seq: localState.seq, input }));
+}
+
+function applyLocal(input) {
+  const speed = 5;
+  if (input.left) localState.x -= speed;
+  if (input.right) localState.x += speed;
+  if (input.up) localState.y -= speed;
+  if (input.down) localState.y += speed;
+  localState.x = Math.max(0, Math.min(mapW, localState.x));
+  localState.y = Math.max(0, Math.min(mapH, localState.y));
+}
+
+function render() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  const renderTime = Date.now() - interpolationDelay;
+  if (snapshotBuffer.length >= 2) {
+    let older = null, newer = null;
+    for (let i=0;i<snapshotBuffer.length-1;i++){
+      if (snapshotBuffer[i].t <= renderTime && snapshotBuffer[i+1].t >= renderTime) {
+        older = snapshotBuffer[i]; newer = snapshotBuffer[i+1]; break;
+      }
+    }
+    if (!older) {
+      older = snapshotBuffer[snapshotBuffer.length-2];
+      newer = snapshotBuffer[snapshotBuffer.length-1];
+    }
+    const dt = (newer.t - older.t) || 1;
+    const ratio = (renderTime - older.t) / dt;
+    if (newer.coins) {
+      for (const c of newer.coins) {
+        ctx.fillStyle = 'gold';
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 8, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+    const ids = new Set();
+    if (older.players) older.players.forEach(p=>ids.add(p.id));
+    if (newer.players) newer.players.forEach(p=>ids.add(p.id));
+    ids.forEach(pid => {
+      const pa = (older.players||[]).find(p=>p.id===pid) || {x:0,y:0};
+      const pb = (newer.players||[]).find(p=>p.id===pid) || pa;
+      const x = pa.x + (pb.x - pa.x) * ratio;
+      const y = pa.y + (pb.y - pa.y) * ratio;
+      ctx.fillStyle = (pid===myId)?'#2ea8f2':'#f05454';
+      ctx.fillRect(x-12, y-12, 24, 24);
+    });
+  }
+
+  ctx.fillStyle = '#2ea8f2';
+  ctx.fillRect(localState.x-12, localState.y-12, 24, 24);
+
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
